@@ -1,0 +1,82 @@
+syntax = "proto3";
+package muxcore.ffprobe.v1;
+option go_package = "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1;ffprobev1";
+
+service AnalysisService {
+  rpc Analyze(AnalyzeRequest) returns (AnalyzeResponse);
+  rpc GetCached(GetCachedRequest) returns (GetCachedResponse);
+}
+
+message AnalyzeRequest {
+  string file_path = 1;
+}
+
+message AnalyzeResponse {
+  string file_path = 1;
+  string container = 2;
+  int64 size_bytes = 3;
+  double duration_seconds = 4;
+  double overall_bitrate = 5;
+
+  VideoStream video = 6;
+  repeated AudioStream audio = 7;
+  repeated SubtitleStream subtitles = 8;
+
+  MediaQuality quality = 9;
+  string error = 10;
+}
+
+message VideoStream {
+  int32 index = 1;
+  string codec = 2;
+  string codec_long = 3;
+  int32 width = 4;
+  int32 height = 5;
+  string resolution_label = 6;
+  double frame_rate = 7;
+  double bitrate = 8;
+  string pixel_format = 9;
+  string color_primaries = 10;
+  string color_transfer = 11;
+  string color_space = 12;
+  bool hdr = 13;
+  string hdr_type = 14;   // "HDR10", "HDR10+", "Dolby Vision", "HLG", ""
+  string aspect_ratio = 15;
+}
+
+message AudioStream {
+  int32 index = 1;
+  string codec = 2;
+  string codec_long = 3;
+  string language = 4;
+  int32 channels = 5;
+  string channel_layout = 6;
+  double bitrate = 7;
+  string profile = 8;
+}
+
+message SubtitleStream {
+  int32 index = 1;
+  string codec = 2;
+  string language = 3;
+  bool forced = 4;
+  bool hearing_impaired = 5;
+}
+
+message MediaQuality {
+  string label = 1;        // "2160p Remux", "1080p WEB-DL", etc.
+  int32 score = 2;
+  string resolution = 3;   // "2160p", "1080p", "720p", "SD"
+  string source = 4;       // "Remux", "BluRay", "WEB-DL", "HDTV", etc.
+  string codec_group = 5;  // "h264", "hevc", "av1", "vp9"
+  bool hdr = 6;
+}
+
+message GetCachedRequest {
+  string file_path = 1;
+}
+
+message GetCachedResponse {
+  AnalyzeResponse result = 1;
+  bool found = 2;
+}
