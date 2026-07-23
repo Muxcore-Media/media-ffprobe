@@ -26,8 +26,21 @@ Media file ──→ media-ffprobe (ffprobe) ──→ Structured analysis
 
 - **HDR detection** — identifies HDR10, HDR10+, Dolby Vision, and HLG from color metadata
 - **Quality classification** — assigns scores based on resolution (2160p > 1080p > 720p), source (Remux > BluRay > WEB-DL), and HDR
-- **Multi-stream parsing** — reports all video, audio, and subtitle tracks
-- **SQLite cache** — avoids re-analysis of unchanged files; invalidates on file modification
+- **Multi-stream parsing** — primary video stream plus all audio and subtitle tracks
+- **SQLite cache** — avoids re-analysis of unchanged files; invalidates on size/mtime change
+- **gRPC API** — `Analyze`, `GetCached` (`muxcore.ffprobe.v1.AnalysisService`)
+
+---
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FFPROBE_DB_PATH` | `/var/lib/media-ffprobe/cache.db` | SQLite analysis cache path |
+| `FFPROBE_GRPC_ADDR` | `:9480` | Module analysis gRPC listen address |
+| `MUXCORE_MODULE_ID` | `media-ffprobe` | Module ID registered with core |
+| `MUXCORE_GRPC_ADDR` | (SDK default) | Core mesh gRPC address |
+| `MUXCORE_INSECURE_DISABLE_TLS` | `false` | Disable TLS for local/dev |
 
 ---
 
@@ -38,7 +51,7 @@ Media file ──→ media-ffprobe (ffprobe) ──→ Structured analysis
 make build
 
 # Run
-export MUXCORE_GRPC_INSECURE=true
+export MUXCORE_INSECURE_DISABLE_TLS=true
 ./media-ffprobe --muxcore-mesh-addr localhost:9090
 
 # Analyze a file
