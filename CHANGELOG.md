@@ -1,5 +1,11 @@
 # Changelog
 
+
+## [0.1.5] — 2026-08-10
+
+### Fixed
+- Module `Info().Version` aligned to **0.1.5** (was 0.1.3).
+
 ## v0.1.3 (2026-08-10)
 
 - Drop bare `metadata` capability (collides with metadata-tmdb discovery); keep `media.analyzer`
