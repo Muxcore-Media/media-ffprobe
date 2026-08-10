@@ -1,6 +1,15 @@
 # Changelog
 
 
+## [0.1.7] — 2026-08-10
+
+### Added
+- SettingsProvider mesh (`RegisterSettings`) for `ffprobe_bin` and `probe_timeout`.
+
+### Changed
+- Pin `core/sdk/go/module` to **v0.5.2**.
+
+
 ## [0.1.6] — 2026-08-10
 
 ### Fixed
