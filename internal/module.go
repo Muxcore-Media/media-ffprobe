@@ -22,26 +22,32 @@ import (
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
+	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
 	_ "modernc.org/sqlite"
 )
 
 type Module struct {
 	ffprobev1.UnimplementedAnalysisServiceServer
 
-	mu sync.RWMutex
-	db *sql.DB
+	mu    sync.RWMutex
+	cfgMu sync.RWMutex
+	db    *sql.DB
 
-	id       string
-	dbPath   string
-	grpcAddr string
-	grpcSrv  *grpc.Server
-	grpcLis  net.Listener
+	id           string
+	dbPath       string
+	grpcAddr     string
+	ffprobeBin   string
+	probeTimeout time.Duration
+	grpcSrv      *grpc.Server
+	grpcLis      net.Listener
 }
 
 type Config struct {
-	ID       string
-	DBPath   string
-	GRPCAddr string
+	ID           string
+	DBPath       string
+	GRPCAddr     string
+	FFprobeBin   string
+	ProbeTimeout time.Duration
 }
 
 func NewModule(cfg Config) *Module {
@@ -54,16 +60,32 @@ func NewModule(cfg Config) *Module {
 	if cfg.GRPCAddr == "" {
 		cfg.GRPCAddr = ":9480"
 	}
+	if cfg.FFprobeBin == "" {
+		cfg.FFprobeBin = "ffprobe"
+	}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = 30 * time.Second
+	}
 	if v := os.Getenv("FFPROBE_DB_PATH"); v != "" {
 		cfg.DBPath = v
 	}
 	if v := os.Getenv("FFPROBE_GRPC_ADDR"); v != "" {
 		cfg.GRPCAddr = v
 	}
+	if v := os.Getenv("FFPROBE_BIN"); v != "" {
+		cfg.FFprobeBin = v
+	}
+	if v := os.Getenv("FFPROBE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.ProbeTimeout = d
+		}
+	}
 	return &Module{
-		id:       cfg.ID,
-		dbPath:   cfg.DBPath,
-		grpcAddr: cfg.GRPCAddr,
+		id:           cfg.ID,
+		dbPath:       cfg.DBPath,
+		grpcAddr:     cfg.GRPCAddr,
+		ffprobeBin:   cfg.FFprobeBin,
+		probeTimeout: cfg.ProbeTimeout,
 	}
 }
 
@@ -71,7 +93,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media FFprobe",
-		Version:      "0.1.6",
+		Version:      "0.1.7",
 		Roles:          []string{"analyzer"},
 		Description:    "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
 		Author:         "MuxCore",
@@ -129,6 +151,7 @@ func (m *Module) Init(ctx context.Context) error {
 func (m *Module) Start(ctx context.Context) error {
 	m.grpcSrv = grpc.NewServer()
 	ffprobev1.RegisterAnalysisServiceServer(m.grpcSrv, m)
+	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
 	go func() {
 		slog.Info("media-ffprobe gRPC service started", "addr", m.grpcAddr)
@@ -294,10 +317,10 @@ func (m *Module) storeCache(path string, result *ffprobev1.AnalyzeResponse) {
 // ── ffprobe invocation ─────────────────────────────────────────
 
 func (m *Module) runFFprobe(path string) (*ffprobev1.AnalyzeResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), m.getProbeTimeout())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, m.getFFprobeBin(),
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",
