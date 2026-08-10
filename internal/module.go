@@ -71,7 +71,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media FFprobe",
-		Version:        "0.1.5",
+		Version:      "0.1.6",
 		Roles:          []string{"analyzer"},
 		Description:    "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
 		Author:         "MuxCore",
