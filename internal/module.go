@@ -71,11 +71,12 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:             m.id,
 		Name:           "Media FFprobe",
-		Version:        "0.1.0",
+		Version:        "0.1.1",
 		Roles:          []string{"analyzer"},
 		Description:    "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
 		Author:         "MuxCore",
-		Capabilities:   []string{"media.analyzer", "metadata"},
+		// Do not advertise bare "metadata" — that collides with metadata-tmdb discovery.
+		Capabilities:   []string{"media.analyzer"},
 		MinCoreVersion: "0.4.0",
 		HTTPAddr:       m.grpcAddr,
 	}
