@@ -350,6 +350,10 @@ func TestParseOutputStreams(t *testing.T) {
 			},
 			{Index: 3, CodecType: "data", CodecName: "bin_data"},
 		},
+		Chapters: []ffprobeChapter{
+			{ID: 0, StartTime: "0.000000", EndTime: "90.000000", Tags: map[string]string{"title": "Opening"}},
+			{ID: 1, StartTime: "90.000000", EndTime: "600.000000", Tags: map[string]string{"title": "Act 1"}},
+		},
 	}
 	resp := m.parseOutput("/media/movie.mkv", out)
 	if resp.FilePath != "/media/movie.mkv" {
@@ -375,6 +379,9 @@ func TestParseOutputStreams(t *testing.T) {
 	}
 	if resp.Quality == nil {
 		t.Fatal("expected quality classification")
+	}
+	if len(resp.Chapters) != 2 || resp.Chapters[0].GetTitle() != "Opening" || resp.Chapters[1].GetStartSeconds() != 90 {
+		t.Fatalf("chapters=%+v", resp.Chapters)
 	}
 }
 

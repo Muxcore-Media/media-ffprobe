@@ -24,6 +24,7 @@ message AnalyzeResponse {
 
   MediaQuality quality = 9;
   string error = 10;
+  repeated Chapter chapters = 11;
 }
 
 message VideoStream {
@@ -61,6 +62,15 @@ message SubtitleStream {
   string language = 3;
   bool forced = 4;
   bool hearing_impaired = 5;
+}
+
+// Chapter marker embedded in the container (MKV/MP4/etc.), from ffprobe -show_chapters.
+message Chapter {
+  int32 index = 1;
+  string title = 2;
+  double start_seconds = 3;
+  double end_seconds = 4;
+  string source = 5; // embedded | scene | interval
 }
 
 message MediaQuality {

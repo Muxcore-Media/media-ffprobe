@@ -91,12 +91,12 @@ func NewModule(cfg Config) *Module {
 
 func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
-		ID:             m.id,
-		Name:           "Media FFprobe",
-		Version:      "0.1.8",
-		Roles:          []string{"analyzer"},
-		Description:    "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
-		Author:         "MuxCore",
+		ID:          m.id,
+		Name:        "Media FFprobe",
+		Version:     "0.1.8",
+		Roles:       []string{"analyzer"},
+		Description: "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
+		Author:      "MuxCore",
 		// Do not advertise bare "metadata" — that collides with metadata-tmdb discovery.
 		Capabilities:   []string{"media.analyzer", "settings"},
 		MinCoreVersion: "0.4.0",
@@ -189,8 +189,9 @@ func (m *Module) Health(ctx context.Context) error {
 // ── ffprobe types ─────────────────────────────────────────────
 
 type ffprobeOutput struct {
-	Streams []ffprobeStream `json:"streams"`
-	Format  ffprobeFormat   `json:"format"`
+	Streams  []ffprobeStream  `json:"streams"`
+	Format   ffprobeFormat    `json:"format"`
+	Chapters []ffprobeChapter `json:"chapters"`
 }
 
 type ffprobeFormat struct {
@@ -233,6 +234,13 @@ type ffprobeSideData struct {
 	SideDataType string `json:"side_data_type"`
 }
 
+type ffprobeChapter struct {
+	ID        int               `json:"id"`
+	StartTime string            `json:"start_time"`
+	EndTime   string            `json:"end_time"`
+	Tags      map[string]string `json:"tags"`
+}
+
 // ── gRPC API ───────────────────────────────────────────────────
 
 func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*ffprobev1.AnalyzeResponse, error) {
@@ -249,9 +257,18 @@ func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*f
 		return cached, nil
 	}
 
-	result, err := m.runFFprobe(path)
-	if err != nil {
-		return nil, fmt.Errorf("ffprobe analysis: %w", err)
+	var result *ffprobev1.AnalyzeResponse
+	var err error
+	if ffprobeAvailable(m.getFFprobeBin()) {
+		result, err = m.runFFprobe(path)
+		if err != nil {
+			return nil, fmt.Errorf("ffprobe analysis: %w", err)
+		}
+	} else {
+		result, err = stubAnalyze(path)
+		if err != nil {
+			return nil, fmt.Errorf("stub analysis: %w", err)
+		}
 	}
 
 	m.storeCache(path, result)
@@ -325,6 +342,7 @@ func (m *Module) runFFprobe(path string) (*ffprobev1.AnalyzeResponse, error) {
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
+		"-show_chapters",
 		path,
 	)
 
@@ -385,7 +403,39 @@ func (m *Module) parseOutput(path string, out *ffprobeOutput) *ffprobev1.Analyze
 	resp.Subtitles = subs
 
 	resp.Quality = classifyQuality(resp.Video)
+	resp.Chapters = parseChapters(out.Chapters, resp.DurationSeconds)
+	if len(resp.Chapters) == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), m.getProbeTimeout())
+		defer cancel()
+		resp.Chapters = enrichChaptersFromFile(ctx, ffmpegBinFor(m.getFFprobeBin()), path, resp.DurationSeconds, nil)
+	}
 	return resp
+}
+
+func parseChapters(in []ffprobeChapter, duration float64) []*ffprobev1.Chapter {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*ffprobev1.Chapter, 0, len(in))
+	for i, ch := range in {
+		start, _ := strconv.ParseFloat(ch.StartTime, 64)
+		end, _ := strconv.ParseFloat(ch.EndTime, 64)
+		if end <= start && duration > start {
+			end = duration
+		}
+		title := strings.TrimSpace(ch.Tags["title"])
+		if title == "" {
+			title = fmt.Sprintf("Chapter %d", i+1)
+		}
+		out = append(out, &ffprobev1.Chapter{
+			Index:         int32(ch.ID),
+			Title:         title,
+			StartSeconds:  start,
+			EndSeconds:    end,
+			Source:        chapterSourceEmbedded,
+		})
+	}
+	return out
 }
 
 func (m *Module) parseVideo(s ffprobeStream) *ffprobev1.VideoStream {
