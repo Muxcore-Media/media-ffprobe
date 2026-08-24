@@ -117,7 +117,7 @@ func (m *Module) Init(ctx context.Context) error {
 	db.SetMaxOpenConns(1)
 
 	if _, err := db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("enable WAL: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -129,7 +129,7 @@ func (m *Module) Init(ctx context.Context) error {
 			created_at   TEXT NOT NULL
 		)
 	`); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("create cache table: %w", err)
 	}
 
@@ -139,7 +139,7 @@ func (m *Module) Init(ctx context.Context) error {
 
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("listen gRPC %s: %w", m.grpcAddr, err)
 	}
 	m.grpcLis = lis
@@ -168,7 +168,7 @@ func (m *Module) Stop(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	if m.db != nil {
-		m.db.Close()
+		_ = m.db.Close()
 		m.db = nil
 	}
 	m.mu.Unlock()
@@ -327,7 +327,7 @@ func (m *Module) storeCache(path string, result *ffprobev1.AnalyzeResponse) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.db.Exec(`INSERT OR REPLACE INTO analysis_cache (file_path, file_size, file_modtime, result_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+	_, _ = m.db.Exec(`INSERT OR REPLACE INTO analysis_cache (file_path, file_size, file_modtime, result_json, created_at) VALUES (?, ?, ?, ?, ?)`,
 		path, info.Size(), info.ModTime().Unix(), string(jsonBytes), time.Now().UTC().Format(time.RFC3339))
 }
 
@@ -428,11 +428,11 @@ func parseChapters(in []ffprobeChapter, duration float64) []*ffprobev1.Chapter {
 			title = fmt.Sprintf("Chapter %d", i+1)
 		}
 		out = append(out, &ffprobev1.Chapter{
-			Index:         int32(ch.ID),
-			Title:         title,
-			StartSeconds:  start,
-			EndSeconds:    end,
-			Source:        chapterSourceEmbedded,
+			Index:        int32(ch.ID),
+			Title:        title,
+			StartSeconds: start,
+			EndSeconds:   end,
+			Source:       chapterSourceEmbedded,
 		})
 	}
 	return out
