@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/Muxcore-Media/core/pkg/contracts v0.5.8
-	github.com/Muxcore-Media/core/sdk/go/module v0.5.8
+	github.com/Muxcore-Media/core/sdk/go/module v0.5.2
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.52.0
@@ -26,9 +26,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/Muxcore-Media/core => ../core
-
-replace github.com/Muxcore-Media/core/pkg/contracts => ../core/pkg/contracts
-
-replace github.com/Muxcore-Media/core/sdk/go/module => ../core/sdk/go/module

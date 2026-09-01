@@ -15,8 +15,8 @@ services:
 
   media-ffprobe:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: media-ffprobe/Dockerfile
     ports:
       - "9480"
     environment:
@@ -24,6 +24,7 @@ services:
       MUXCORE_INSECURE_DISABLE_TLS: "true"
       MUXCORE_LOG_LEVEL: debug
       MUXCORE_MODULE_ID: media-ffprobe
+      FFPROBE_ALLOW_PATHS: /media
     volumes:
       - /path/to/media:/media:ro
       - ffprobe-data:/var/lib/media-ffprobe

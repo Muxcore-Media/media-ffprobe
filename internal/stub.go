@@ -51,7 +51,7 @@ func stubAnalyze(path string) (*ffprobev1.AnalyzeResponse, error) {
 		Video:     video,
 		Error:     stubErrorNote,
 	}
-	resp.Quality = classifyQuality(video)
+	resp.Quality = classifyQuality(path, video)
 	return resp, nil
 }
 

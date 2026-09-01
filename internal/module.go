@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
 
@@ -33,21 +35,29 @@ type Module struct {
 	cfgMu sync.RWMutex
 	db    *sql.DB
 
-	id           string
-	dbPath       string
-	grpcAddr     string
-	ffprobeBin   string
-	probeTimeout time.Duration
-	grpcSrv      *grpc.Server
-	grpcLis      net.Listener
+	id               string
+	dbPath           string
+	grpcAddr         string
+	ffprobeBin       string
+	ffmpegBin        string
+	probeTimeout     time.Duration
+	cacheMaxAge      time.Duration
+	allowPaths       []string
+	generateChapters bool
+	grpcSrv          *grpc.Server
+	grpcLis          net.Listener
 }
 
 type Config struct {
-	ID           string
-	DBPath       string
-	GRPCAddr     string
-	FFprobeBin   string
-	ProbeTimeout time.Duration
+	ID               string
+	DBPath           string
+	GRPCAddr         string
+	FFprobeBin       string
+	FFmpegBin        string
+	ProbeTimeout     time.Duration
+	CacheMaxAge      time.Duration
+	AllowPaths       []string
+	GenerateChapters bool
 }
 
 func NewModule(cfg Config) *Module {
@@ -75,17 +85,35 @@ func NewModule(cfg Config) *Module {
 	if v := os.Getenv("FFPROBE_BIN"); v != "" {
 		cfg.FFprobeBin = v
 	}
+	if v := os.Getenv("FFMPEG_BIN"); v != "" && cfg.FFmpegBin == "" {
+		cfg.FFmpegBin = v
+	}
 	if v := os.Getenv("FFPROBE_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			cfg.ProbeTimeout = d
 		}
 	}
+	if v := os.Getenv("FFPROBE_CACHE_MAX_AGE"); v != "" && cfg.CacheMaxAge <= 0 {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.CacheMaxAge = d
+		}
+	}
+	if len(cfg.AllowPaths) == 0 {
+		cfg.AllowPaths = parseAllowPaths(os.Getenv("FFPROBE_ALLOW_PATHS"), nil)
+	}
+	if v := os.Getenv("FFPROBE_GENERATE_CHAPTERS"); v != "" {
+		cfg.GenerateChapters = parseBoolSetting(v)
+	}
 	return &Module{
-		id:           cfg.ID,
-		dbPath:       cfg.DBPath,
-		grpcAddr:     cfg.GRPCAddr,
-		ffprobeBin:   cfg.FFprobeBin,
-		probeTimeout: cfg.ProbeTimeout,
+		id:               cfg.ID,
+		dbPath:           cfg.DBPath,
+		grpcAddr:         cfg.GRPCAddr,
+		ffprobeBin:       cfg.FFprobeBin,
+		ffmpegBin:        cfg.FFmpegBin,
+		probeTimeout:     cfg.ProbeTimeout,
+		cacheMaxAge:      cfg.CacheMaxAge,
+		allowPaths:       cfg.AllowPaths,
+		generateChapters: cfg.GenerateChapters,
 	}
 }
 
@@ -137,6 +165,11 @@ func (m *Module) Init(ctx context.Context) error {
 	m.db = db
 	m.mu.Unlock()
 
+	if err := m.pruneStaleCache(ctx); err != nil {
+		_ = db.Close()
+		return err
+	}
+
 	lis, err := net.Listen("tcp", m.grpcAddr)
 	if err != nil {
 		_ = db.Close()
@@ -145,6 +178,27 @@ func (m *Module) Init(ctx context.Context) error {
 	m.grpcLis = lis
 
 	slog.Info("media-ffprobe initialized", "db", m.dbPath, "grpc", m.grpcAddr)
+	return nil
+}
+
+func (m *Module) pruneStaleCache(ctx context.Context) error {
+	if m.cacheMaxAge <= 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().Add(-m.cacheMaxAge).Format(time.RFC3339)
+	m.mu.RLock()
+	db := m.db
+	m.mu.RUnlock()
+	if db == nil {
+		return nil
+	}
+	res, err := db.ExecContext(ctx, `DELETE FROM analysis_cache WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return fmt.Errorf("prune stale cache: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		slog.Info("media-ffprobe pruned stale cache entries", "count", n, "max_age", m.cacheMaxAge)
+	}
 	return nil
 }
 
@@ -183,7 +237,13 @@ func (m *Module) Health(ctx context.Context) error {
 	if db == nil {
 		return fmt.Errorf("not initialized")
 	}
-	return db.PingContext(ctx)
+	if err := db.PingContext(ctx); err != nil {
+		return err
+	}
+	if !ffprobeAvailable(m.getFFprobeBin()) {
+		return fmt.Errorf("ffprobe not available at %q", m.getFFprobeBin())
+	}
+	return nil
 }
 
 // ── ffprobe types ─────────────────────────────────────────────
@@ -244,9 +304,9 @@ type ffprobeChapter struct {
 // ── gRPC API ───────────────────────────────────────────────────
 
 func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*ffprobev1.AnalyzeResponse, error) {
-	path := req.GetFilePath()
-	if path == "" {
-		return nil, fmt.Errorf("file_path is required")
+	path, err := m.authorizePath(req.GetFilePath())
+	if err != nil {
+		return nil, err
 	}
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -258,9 +318,8 @@ func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*f
 	}
 
 	var result *ffprobev1.AnalyzeResponse
-	var err error
 	if ffprobeAvailable(m.getFFprobeBin()) {
-		result, err = m.runFFprobe(path)
+		result, err = m.runFFprobe(ctx, path)
 		if err != nil {
 			return nil, fmt.Errorf("ffprobe analysis: %w", err)
 		}
@@ -271,15 +330,52 @@ func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*f
 		}
 	}
 
-	m.storeCache(path, result)
+	if result.GetError() == "" {
+		m.storeCache(path, result)
+	}
 	return result, nil
 }
 
 func (m *Module) GetCached(ctx context.Context, req *ffprobev1.GetCachedRequest) (*ffprobev1.GetCachedResponse, error) {
-	if cached := m.checkCache(req.GetFilePath()); cached != nil {
+	path, err := m.authorizePath(req.GetFilePath())
+	if err != nil {
+		return nil, err
+	}
+	if cached := m.checkCache(path); cached != nil {
 		return &ffprobev1.GetCachedResponse{Result: cached, Found: true}, nil
 	}
 	return &ffprobev1.GetCachedResponse{Found: false}, nil
+}
+
+func (m *Module) Invalidate(ctx context.Context, req *ffprobev1.InvalidateRequest) (*ffprobev1.InvalidateResponse, error) {
+	path, err := m.authorizePath(req.GetFilePath())
+	if err != nil {
+		return nil, err
+	}
+	removed, err := m.invalidateCache(path)
+	if err != nil {
+		return nil, err
+	}
+	return &ffprobev1.InvalidateResponse{Removed: removed}, nil
+}
+
+func (m *Module) PurgeCache(ctx context.Context, _ *ffprobev1.PurgeCacheRequest) (*ffprobev1.PurgeCacheResponse, error) {
+	n, err := m.purgeCache(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &ffprobev1.PurgeCacheResponse{RemovedCount: n}, nil
+}
+
+func (m *Module) authorizePath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", status.Error(codes.InvalidArgument, "file_path is required")
+	}
+	resolved, err := validateMediaPath(path, m.getAllowPaths())
+	if err != nil {
+		return "", status.Error(codes.PermissionDenied, err.Error())
+	}
+	return resolved, nil
 }
 
 // ── Cache ──────────────────────────────────────────────────────
@@ -331,10 +427,41 @@ func (m *Module) storeCache(path string, result *ffprobev1.AnalyzeResponse) {
 		path, info.Size(), info.ModTime().Unix(), string(jsonBytes), time.Now().UTC().Format(time.RFC3339))
 }
 
+func (m *Module) invalidateCache(path string) (bool, error) {
+	m.mu.RLock()
+	db := m.db
+	m.mu.RUnlock()
+	if db == nil {
+		return false, fmt.Errorf("not initialized")
+	}
+	res, err := db.ExecContext(context.Background(), `DELETE FROM analysis_cache WHERE file_path = ?`, path)
+	if err != nil {
+		return false, fmt.Errorf("invalidate cache: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (m *Module) purgeCache(ctx context.Context) (int64, error) {
+	m.mu.RLock()
+	db := m.db
+	m.mu.RUnlock()
+	if db == nil {
+		return 0, fmt.Errorf("not initialized")
+	}
+	res, err := db.ExecContext(ctx, `DELETE FROM analysis_cache`)
+	if err != nil {
+		return 0, fmt.Errorf("purge cache: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ── ffprobe invocation ─────────────────────────────────────────
 
-func (m *Module) runFFprobe(path string) (*ffprobev1.AnalyzeResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), m.getProbeTimeout())
+func (m *Module) runFFprobe(ctx context.Context, path string) (*ffprobev1.AnalyzeResponse, error) {
+	timeout := m.getProbeTimeout()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, m.getFFprobeBin(),
@@ -359,10 +486,10 @@ func (m *Module) runFFprobe(path string) (*ffprobev1.AnalyzeResponse, error) {
 		return nil, fmt.Errorf("parse ffprobe output: %w", err)
 	}
 
-	return m.parseOutput(path, &output), nil
+	return m.parseOutput(ctx, path, &output), nil
 }
 
-func (m *Module) parseOutput(path string, out *ffprobeOutput) *ffprobev1.AnalyzeResponse {
+func (m *Module) parseOutput(ctx context.Context, path string, out *ffprobeOutput) *ffprobev1.AnalyzeResponse {
 	resp := &ffprobev1.AnalyzeResponse{
 		FilePath: path,
 	}
@@ -385,6 +512,9 @@ func (m *Module) parseOutput(path string, out *ffprobeOutput) *ffprobev1.Analyze
 	for _, s := range out.Streams {
 		switch s.CodecType {
 		case "video":
+			if s.Disposition != nil && s.Disposition["attached_pic"] == 1 {
+				continue
+			}
 			v := m.parseVideo(s)
 			videos = append(videos, v)
 		case "audio":
@@ -397,19 +527,33 @@ func (m *Module) parseOutput(path string, out *ffprobeOutput) *ffprobev1.Analyze
 	}
 
 	if len(videos) > 0 {
-		resp.Video = videos[0]
+		resp.Video = pickPrimaryVideo(videos)
 	}
 	resp.Audio = audios
 	resp.Subtitles = subs
 
-	resp.Quality = classifyQuality(resp.Video)
+	resp.Quality = classifyQuality(path, resp.Video)
 	resp.Chapters = parseChapters(out.Chapters, resp.DurationSeconds)
-	if len(resp.Chapters) == 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), m.getProbeTimeout())
-		defer cancel()
-		resp.Chapters = enrichChaptersFromFile(ctx, ffmpegBinFor(m.getFFprobeBin()), path, resp.DurationSeconds, nil)
+	if len(resp.Chapters) == 0 && m.getGenerateChapters() {
+		resp.Chapters = enrichChaptersFromFile(ctx, m.getFFmpegBin(), path, resp.DurationSeconds, nil)
 	}
 	return resp
+}
+
+func pickPrimaryVideo(videos []*ffprobev1.VideoStream) *ffprobev1.VideoStream {
+	if len(videos) == 0 {
+		return nil
+	}
+	best := videos[0]
+	bestArea := int64(best.GetWidth()) * int64(best.GetHeight())
+	for _, v := range videos[1:] {
+		area := int64(v.GetWidth()) * int64(v.GetHeight())
+		if area > bestArea {
+			best = v
+			bestArea = area
+		}
+	}
+	return best
 }
 
 func parseChapters(in []ffprobeChapter, duration float64) []*ffprobev1.Chapter {
@@ -450,6 +594,8 @@ func (m *Module) parseVideo(s ffprobeStream) *ffprobev1.VideoStream {
 		ColorTransfer:  s.ColorTransfer,
 		ColorSpace:     s.ColorSpace,
 		AspectRatio:    s.AspectRatio,
+		FieldOrder:     s.FieldOrder,
+		Interlaced:     isInterlaced(s.FieldOrder),
 	}
 
 	v.FrameRate = parseFrameRate(s.RFrameRate)
@@ -466,6 +612,19 @@ func (m *Module) parseVideo(s ffprobeStream) *ffprobev1.VideoStream {
 	return v
 }
 
+func isInterlaced(fieldOrder string) bool {
+	fo := strings.ToLower(strings.TrimSpace(fieldOrder))
+	if fo == "" || fo == "progressive" {
+		return false
+	}
+	switch fo {
+	case "tt", "bb", "tb", "bt":
+		return true
+	default:
+		return strings.Contains(fo, "interlaced")
+	}
+}
+
 func (m *Module) parseAudio(s ffprobeStream) *ffprobev1.AudioStream {
 	a := &ffprobev1.AudioStream{
 		Index:         int32(s.Index),
@@ -479,10 +638,17 @@ func (m *Module) parseAudio(s ffprobeStream) *ffprobev1.AudioStream {
 	if b, err := strconv.ParseFloat(s.BitRate, 64); err == nil {
 		a.Bitrate = b
 	}
+	if sr, err := strconv.Atoi(strings.TrimSpace(s.SampleRate)); err == nil {
+		a.SampleRate = int32(sr)
+	}
 	if a.Language == "" {
 		if tagLang, ok := s.Tags["language"]; ok {
 			a.Language = tagLang
 		}
+	}
+	if s.Disposition != nil {
+		a.IsDefault = s.Disposition["default"] == 1
+		a.Commentary = s.Disposition["comment"] == 1
 	}
 	return a
 }
@@ -553,7 +719,7 @@ func hasHDR10Plus(s ffprobeStream) bool {
 
 // ── Quality Classification ─────────────────────────────────────
 
-func classifyQuality(v *ffprobev1.VideoStream) *ffprobev1.MediaQuality {
+func classifyQuality(path string, v *ffprobev1.VideoStream) *ffprobev1.MediaQuality {
 	if v == nil {
 		return &ffprobev1.MediaQuality{Label: "Unknown", Score: 0}
 	}
@@ -564,24 +730,56 @@ func classifyQuality(v *ffprobev1.VideoStream) *ffprobev1.MediaQuality {
 		Hdr:        v.Hdr,
 	}
 
-	q.Source = classifySource(v)
+	q.Source = classifySource(path, v)
 	q.Score = int32(qualityScore(q.Resolution, q.Source, v.Hdr))
 	q.Label = qualityLabel(q.Resolution, q.Source, v.Hdr, q.CodecGroup)
 	return q
 }
 
-func classifySource(v *ffprobev1.VideoStream) string {
-	codec := strings.ToLower(v.Codec)
-	pix := strings.ToLower(v.PixelFormat)
-
-	switch {
-	case strings.Contains(codec, "raw"):
-		return "Remux"
-	case pix == "yuv420p10le" || pix == "yuv420p12le" || pix == "yuv444p10le":
-		return "BluRay"
-	default:
-		return "WEB-DL"
+func classifySource(path string, _ *ffprobev1.VideoStream) string {
+	base := strings.ToLower(filepath.Base(path))
+	tokens := tokenizeBasename(base)
+	for _, tok := range tokens {
+		switch tok {
+		case "remux", "bdremux":
+			return "Remux"
+		}
 	}
+	for _, tok := range tokens {
+		switch tok {
+		case "bluray", "blu-ray", "bdrip", "bdmv":
+			return "BluRay"
+		}
+	}
+	for _, tok := range tokens {
+		switch tok {
+		case "web-dl", "webdl":
+			return "WEB-DL"
+		}
+	}
+	for _, tok := range tokens {
+		switch tok {
+		case "webrip", "web-rip":
+			return "WEBRip"
+		}
+	}
+	for _, tok := range tokens {
+		if tok == "hdtv" {
+			return "HDTV"
+		}
+	}
+	return "WEB-DL"
+}
+
+func tokenizeBasename(base string) []string {
+	replacer := strings.NewReplacer(".", " ", "-", " ", "_", " ")
+	normalized := replacer.Replace(base)
+	fields := strings.Fields(normalized)
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, strings.ToLower(f))
+	}
+	return out
 }
 
 func resolutionLabel(width, height int) string {
@@ -590,8 +788,12 @@ func resolutionLabel(width, height int) string {
 		maxDim = height
 	}
 	switch {
+	case maxDim >= 7680:
+		return "4320p"
 	case maxDim >= 3840:
 		return "2160p"
+	case maxDim >= 2560:
+		return "1440p"
 	case maxDim >= 1920:
 		return "1080p"
 	case maxDim >= 1280:
@@ -622,8 +824,12 @@ func qualityScore(resolution, source string, hdr bool) int {
 	score := 0
 
 	switch resolution {
+	case "4320p":
+		score += 140
 	case "2160p":
 		score += 120
+	case "1440p":
+		score += 110
 	case "1080p":
 		score += 100
 	case "720p":
@@ -641,6 +847,10 @@ func qualityScore(resolution, source string, hdr bool) int {
 		score += 30
 	case "WEB-DL":
 		score += 20
+	case "WEBRip":
+		score += 15
+	case "HDTV":
+		score += 10
 	}
 
 	if hdr {

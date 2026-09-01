@@ -19,8 +19,9 @@ CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+; Library paths often live under /home or /mnt — add them via ReadOnlyPaths= instead of ProtectHome.
 ReadWritePaths=/var/lib/media-ffprobe
+; Example: ReadOnlyPaths=/mnt/media /home/muxcore/media
 
 [Install]
 WantedBy=multi-user.target

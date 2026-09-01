@@ -5,6 +5,8 @@ option go_package = "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1;ffpr
 service AnalysisService {
   rpc Analyze(AnalyzeRequest) returns (AnalyzeResponse);
   rpc GetCached(GetCachedRequest) returns (GetCachedResponse);
+  rpc Invalidate(InvalidateRequest) returns (InvalidateResponse);
+  rpc PurgeCache(PurgeCacheRequest) returns (PurgeCacheResponse);
 }
 
 message AnalyzeRequest {
@@ -43,6 +45,8 @@ message VideoStream {
   bool hdr = 13;
   string hdr_type = 14;   // "HDR10", "HDR10+", "Dolby Vision", "HLG", ""
   string aspect_ratio = 15;
+  string field_order = 16;
+  bool interlaced = 17;
 }
 
 message AudioStream {
@@ -54,6 +58,9 @@ message AudioStream {
   string channel_layout = 6;
   double bitrate = 7;
   string profile = 8;
+  bool is_default = 9;
+  bool commentary = 10;
+  int32 sample_rate = 11;
 }
 
 message SubtitleStream {
@@ -89,4 +96,18 @@ message GetCachedRequest {
 message GetCachedResponse {
   AnalyzeResponse result = 1;
   bool found = 2;
+}
+
+message InvalidateRequest {
+  string file_path = 1;
+}
+
+message InvalidateResponse {
+  bool removed = 1;
+}
+
+message PurgeCacheRequest {}
+
+message PurgeCacheResponse {
+  int64 removed_count = 1;
 }

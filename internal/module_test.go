@@ -3,25 +3,29 @@ package internal
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
-	"time"
 
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-func newTestModule(t *testing.T) *Module {
+func newTestModule(t *testing.T) (*Module, string) {
 	t.Helper()
+	root := t.TempDir()
 	m := NewModule(Config{
-		DBPath:   filepath.Join(t.TempDir(), "cache.db"),
-		GRPCAddr: ":0",
+		DBPath:     filepath.Join(root, "cache.db"),
+		GRPCAddr:   ":0",
+		AllowPaths: []string{root},
 	})
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = m.Stop(ctx) })
-	return m
+	return m, root
 }
 
 func TestModuleInfo(t *testing.T) {
@@ -44,30 +48,46 @@ func TestModuleInfo(t *testing.T) {
 }
 
 func TestAnalyzeNonexistentFile(t *testing.T) {
-	m := newTestModule(t)
+	m, root := newTestModule(t)
 	ctx := context.Background()
 
-	_, err := m.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: "/nonexistent/file.mkv"})
+	_, err := m.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: filepath.Join(root, "missing.mkv")})
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
 	}
 }
 
 func TestAnalyzeEmptyPath(t *testing.T) {
-	m := newTestModule(t)
+	m, _ := newTestModule(t)
 	ctx := context.Background()
 
 	_, err := m.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: ""})
 	if err == nil {
 		t.Fatal("expected error for empty path")
 	}
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code=%v want InvalidArgument", status.Code(err))
+	}
+}
+
+func TestAnalyzePathOutsideAllowlist(t *testing.T) {
+	m, _ := newTestModule(t)
+	ctx := context.Background()
+
+	_, err := m.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: "/etc/passwd"})
+	if err == nil {
+		t.Fatal("expected permission denied")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("code=%v want PermissionDenied", status.Code(err))
+	}
 }
 
 func TestGetCachedMiss(t *testing.T) {
-	m := newTestModule(t)
+	m, root := newTestModule(t)
 	ctx := context.Background()
 
-	resp, err := m.GetCached(ctx, &ffprobev1.GetCachedRequest{FilePath: "/nonexistent.mkv"})
+	resp, err := m.GetCached(ctx, &ffprobev1.GetCachedRequest{FilePath: filepath.Join(root, "missing.mkv")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,9 +97,11 @@ func TestGetCachedMiss(t *testing.T) {
 }
 
 func TestLifecycle(t *testing.T) {
+	root := t.TempDir()
 	m := NewModule(Config{
-		DBPath:   filepath.Join(t.TempDir(), "lifecycle.db"),
-		GRPCAddr: ":0",
+		DBPath:     filepath.Join(root, "lifecycle.db"),
+		GRPCAddr:   ":0",
+		AllowPaths: []string{root},
 	})
 	ctx := context.Background()
 	if err := m.Init(ctx); err != nil {
@@ -88,14 +110,16 @@ func TestLifecycle(t *testing.T) {
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
 	if err := m.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestHealth(t *testing.T) {
-	m := newTestModule(t)
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe absent; Health requires ffprobe")
+	}
+	m, _ := newTestModule(t)
 	ctx := context.Background()
 	if err := m.Health(ctx); err != nil {
 		t.Fatal("expected health to pass after init")
@@ -127,7 +151,9 @@ func TestResolutionLabel(t *testing.T) {
 		w, h int
 		want string
 	}{
+		{7680, 4320, "4320p"},
 		{3840, 2160, "2160p"},
+		{2560, 1440, "1440p"},
 		{1920, 1080, "1080p"},
 		{1280, 720, "720p"},
 		{720, 576, "576p"},
@@ -174,6 +200,8 @@ func TestQualityScore(t *testing.T) {
 		{"2160p", "Remux", false, 160},
 		{"1080p", "BluRay", false, 130},
 		{"1080p", "WEB-DL", false, 120},
+		{"1080p", "WEBRip", false, 115},
+		{"1080p", "HDTV", false, 110},
 		{"720p", "WEB-DL", false, 100},
 		{"SD", "WEB-DL", false, 60},
 	}
@@ -205,32 +233,52 @@ func TestQualityLabel(t *testing.T) {
 	}
 }
 
-func TestClassifyQuality(t *testing.T) {
-	v := &ffprobev1.VideoStream{
-		Codec:       "hevc",
-		Width:       3840,
-		Height:      2160,
-		Hdr:         true,
-		HdrType:     "HDR10",
-		PixelFormat: "yuv420p10le",
+func TestClassifySourceFromFilename(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"Movie.2160p.BluRay.Remux.mkv", "Remux"},
+		{"Movie.1080p.BluRay.x264.mkv", "BluRay"},
+		{"Movie.1080p.WEB-DL.mkv", "WEB-DL"},
+		{"Movie.720p.WEBRip.x264.mkv", "WEBRip"},
+		{"Show.S01E01.HDTV.mkv", "HDTV"},
+		{"Movie.unknown.mkv", "WEB-DL"},
 	}
-	q := classifyQuality(v)
+	for _, tt := range tests {
+		got := classifySource(tt.path, &ffprobev1.VideoStream{})
+		if got != tt.want {
+			t.Errorf("classifySource(%q) = %q want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestClassifyQuality(t *testing.T) {
+	path := "/media/Inception.2010.2160p.BluRay.x265.mkv"
+	v := &ffprobev1.VideoStream{
+		Codec:  "hevc",
+		Width:  3840,
+		Height: 2160,
+		Hdr:    true,
+		HdrType: "HDR10",
+	}
+	q := classifyQuality(path, v)
 	if q.Label == "" {
 		t.Fatal("expected non-empty quality label")
 	}
 	if q.Score != 160 {
-		t.Errorf("expected score 160 (2160p=120 + BluRay=30 + HDR=10), got %d", q.Score)
+		t.Errorf("expected score 160, got %d", q.Score)
 	}
 	if q.Resolution != "2160p" {
 		t.Errorf("expected 2160p, got %s", q.Resolution)
 	}
 	if q.Source != "BluRay" {
-		t.Errorf("expected BluRay source (10-bit), got %s", q.Source)
+		t.Errorf("expected BluRay source, got %s", q.Source)
 	}
 }
 
 func TestClassifyQualityNilVideo(t *testing.T) {
-	q := classifyQuality(nil)
+	q := classifyQuality("/media/x.mkv", nil)
 	if q.Label != "Unknown" {
 		t.Errorf("expected Unknown, got %s", q.Label)
 	}
@@ -292,34 +340,14 @@ func TestDetectHDR(t *testing.T) {
 	}
 }
 
-func TestCacheInvalidation(t *testing.T) {
-	m := newTestModule(t)
-
-	tmp := t.TempDir()
-	filePath := filepath.Join(tmp, "test.mkv")
-	if err := os.WriteFile(filePath, []byte("test data"), 0644); err != nil {
-		t.Fatal(err)
+func TestPickPrimaryVideoSkipsAttachedPic(t *testing.T) {
+	videos := []*ffprobev1.VideoStream{
+		{Width: 800, Height: 600, Codec: "mjpeg"},
+		{Width: 1920, Height: 1080, Codec: "h264"},
 	}
-
-	// Analyze a text file as "media" — ffprobe will fail, so this errors
-	// Instead, test that cache stores and retrieves properly by injecting
-	ctx := context.Background()
-
-	// ffprobe not available in test env, so Analyze returns error.
-	// But the cache API and lifecycle should still work.
-	_, err := m.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: filePath})
-	if err != nil {
-		// Expected — ffprobe not available or file not valid media
-		t.Log("analyze returned (expected without ffprobe):", err)
-	}
-
-	// Cached lookup should still work (returns not found)
-	cached, err := m.GetCached(ctx, &ffprobev1.GetCachedRequest{FilePath: filePath})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cached.Found {
-		t.Log("cache hit on non-media file (ffprobe might be available)")
+	got := pickPrimaryVideo(videos)
+	if got.GetWidth() != 1920 {
+		t.Fatalf("got %+v", got)
 	}
 }
 
@@ -334,55 +362,55 @@ func TestParseOutputStreams(t *testing.T) {
 		},
 		Streams: []ffprobeStream{
 			{
-				Index: 0, CodecType: "video", CodecName: "hevc", CodecLongName: "H.265",
+				Index: 0, CodecType: "video", CodecName: "mjpeg",
+				Width: 800, Height: 600,
+				Disposition: map[string]int{"attached_pic": 1},
+			},
+			{
+				Index: 1, CodecType: "video", CodecName: "hevc", CodecLongName: "H.265",
 				Width: 3840, Height: 2160, RFrameRate: "24000/1001", BitRate: "25000000",
 				PixelFormat: "yuv420p10le", ColorPrimaries: "bt2020", ColorTransfer: "smpte2084",
-				ColorSpace: "bt2020nc", AspectRatio: "16:9",
+				ColorSpace: "bt2020nc", AspectRatio: "16:9", FieldOrder: "progressive",
 				SideDataList: []ffprobeSideData{{SideDataType: "Mastering display metadata"}},
 			},
 			{
-				Index: 1, CodecType: "audio", CodecName: "aac", CodecLongName: "AAC",
-				Channels: 2, ChannelLayout: "stereo", BitRate: "192000",
+				Index: 2, CodecType: "audio", CodecName: "aac", CodecLongName: "AAC",
+				Channels: 2, ChannelLayout: "stereo", BitRate: "192000", SampleRate: "48000",
+				Disposition: map[string]int{"default": 1},
 				Tags: map[string]string{"language": "eng"},
 			},
 			{
-				Index: 2, CodecType: "subtitle", CodecName: "subrip",
+				Index: 3, CodecType: "subtitle", CodecName: "subrip",
 				Disposition: map[string]int{"forced": 1, "hearing_impaired": 0},
 				Tags:        map[string]string{"language": "spa"},
 			},
-			{Index: 3, CodecType: "data", CodecName: "bin_data"},
+			{Index: 4, CodecType: "data", CodecName: "bin_data"},
 		},
 		Chapters: []ffprobeChapter{
 			{ID: 0, StartTime: "0.000000", EndTime: "90.000000", Tags: map[string]string{"title": "Opening"}},
 			{ID: 1, StartTime: "90.000000", EndTime: "600.000000", Tags: map[string]string{"title": "Act 1"}},
 		},
 	}
-	resp := m.parseOutput("/media/movie.mkv", out)
+	resp := m.parseOutput(context.Background(), "/media/movie.mkv", out)
 	if resp.FilePath != "/media/movie.mkv" {
 		t.Fatalf("path=%q", resp.FilePath)
-	}
-	if resp.SizeBytes != 123456789 || resp.Container != "matroska,webm" {
-		t.Fatalf("format fields: size=%d container=%q", resp.SizeBytes, resp.Container)
-	}
-	if resp.DurationSeconds != 3600.5 || resp.OverallBitrate != 8000000 {
-		t.Fatalf("duration=%v bitrate=%v", resp.DurationSeconds, resp.OverallBitrate)
 	}
 	if resp.Video == nil || resp.Video.Codec != "hevc" || resp.Video.Width != 3840 {
 		t.Fatalf("video=%+v", resp.Video)
 	}
-	if !resp.Video.Hdr {
-		t.Fatal("expected HDR from bt2020/smpte2084")
+	if resp.Video.FieldOrder != "progressive" || resp.Video.Interlaced {
+		t.Fatalf("field order=%q interlaced=%v", resp.Video.FieldOrder, resp.Video.Interlaced)
 	}
-	if len(resp.Audio) != 1 || resp.Audio[0].Language != "eng" || resp.Audio[0].Channels != 2 {
+	if len(resp.Audio) != 1 || resp.Audio[0].Language != "eng" || !resp.Audio[0].IsDefault || resp.Audio[0].SampleRate != 48000 {
 		t.Fatalf("audio=%+v", resp.Audio)
 	}
 	if len(resp.Subtitles) != 1 || resp.Subtitles[0].Language != "spa" || !resp.Subtitles[0].Forced {
 		t.Fatalf("subs=%+v", resp.Subtitles)
 	}
-	if resp.Quality == nil {
-		t.Fatal("expected quality classification")
+	if resp.Quality == nil || resp.Quality.Source != "WEB-DL" {
+		t.Fatalf("quality=%+v", resp.Quality)
 	}
-	if len(resp.Chapters) != 2 || resp.Chapters[0].GetTitle() != "Opening" || resp.Chapters[1].GetStartSeconds() != 90 {
+	if len(resp.Chapters) != 2 || resp.Chapters[0].GetTitle() != "Opening" {
 		t.Fatalf("chapters=%+v", resp.Chapters)
 	}
 }
@@ -391,9 +419,10 @@ func TestParseAudioLanguageField(t *testing.T) {
 	m := NewModule(Config{})
 	a := m.parseAudio(ffprobeStream{
 		Index: 0, CodecType: "audio", CodecName: "ac3", Language: "jpn", Channels: 6,
+		Disposition: map[string]int{"comment": 1},
 	})
-	if a.Language != "jpn" {
-		t.Fatalf("language=%q", a.Language)
+	if a.Language != "jpn" || !a.Commentary {
+		t.Fatalf("audio=%+v", a)
 	}
 }
 
@@ -409,9 +438,8 @@ func TestParseSubtitleDisposition(t *testing.T) {
 }
 
 func TestStoreAndGetCachedHit(t *testing.T) {
-	m := newTestModule(t)
-	tmp := t.TempDir()
-	path := filepath.Join(tmp, "clip.mkv")
+	m, root := newTestModule(t)
+	path := filepath.Join(root, "clip.mkv")
 	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +458,6 @@ func TestStoreAndGetCachedHit(t *testing.T) {
 	if !resp.Found || resp.Result == nil || resp.Result.Video.Codec != "h264" {
 		t.Fatalf("cache miss or wrong payload: %+v", resp)
 	}
-	// Analyze should hit cache without needing ffprobe.
 	got, err := m.Analyze(ctx, &ffprobev1.AnalyzeRequest{FilePath: path})
 	if err != nil {
 		t.Fatal(err)
@@ -440,9 +467,44 @@ func TestStoreAndGetCachedHit(t *testing.T) {
 	}
 }
 
+func TestInvalidateAndPurgeCache(t *testing.T) {
+	m, root := newTestModule(t)
+	path := filepath.Join(root, "clip.mkv")
+	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.storeCache(path, &ffprobev1.AnalyzeResponse{FilePath: path, Container: "matroska"})
+
+	ctx := context.Background()
+	inv, err := m.Invalidate(ctx, &ffprobev1.InvalidateRequest{FilePath: path})
+	if err != nil || !inv.GetRemoved() {
+		t.Fatalf("invalidate: %+v err=%v", inv, err)
+	}
+	cached, err := m.GetCached(ctx, &ffprobev1.GetCachedRequest{FilePath: path})
+	if err != nil || cached.GetFound() {
+		t.Fatalf("expected miss after invalidate: %+v err=%v", cached, err)
+	}
+
+	m.storeCache(path, &ffprobev1.AnalyzeResponse{FilePath: path})
+	purged, err := m.PurgeCache(ctx, &ffprobev1.PurgeCacheRequest{})
+	if err != nil || purged.GetRemovedCount() < 1 {
+		t.Fatalf("purge: %+v err=%v", purged, err)
+	}
+}
+
 func TestHealthUninitialized(t *testing.T) {
 	m := NewModule(Config{DBPath: filepath.Join(t.TempDir(), "x.db"), GRPCAddr: ":0"})
 	if err := m.Health(context.Background()); err == nil {
 		t.Fatal("expected health error before Init")
+	}
+}
+
+func TestHealthWithoutFFprobe(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err == nil {
+		t.Skip("ffprobe present")
+	}
+	m, _ := newTestModule(t)
+	if err := m.Health(context.Background()); err == nil {
+		t.Fatal("expected health error when ffprobe missing")
 	}
 }

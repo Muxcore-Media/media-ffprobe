@@ -15,11 +15,10 @@ func TestAnalyzeStubWhenFFprobeAbsent(t *testing.T) {
 		t.Skip("ffprobe present on PATH; stub path not exercised")
 	}
 
-	m := newTestModule(t)
+	m, root := newTestModule(t)
 	ctx := context.Background()
 
-	tmp := t.TempDir()
-	filePath := filepath.Join(tmp, "Fight.Club.1999.1080p.BluRay.x264.mkv")
+	filePath := filepath.Join(root, "Fight.Club.1999.1080p.BluRay.x264.mkv")
 	if err := os.WriteFile(filePath, []byte("fixture-bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +36,9 @@ func TestAnalyzeStubWhenFFprobeAbsent(t *testing.T) {
 	if resp.GetQuality() == nil || resp.GetQuality().GetResolution() != "1080p" {
 		t.Fatalf("quality resolution: %+v", resp.GetQuality())
 	}
+	if resp.GetQuality().GetSource() != "BluRay" {
+		t.Fatalf("quality source: %+v", resp.GetQuality())
+	}
 	if resp.GetSizeBytes() != 13 {
 		t.Fatalf("size: got %d want 13", resp.GetSizeBytes())
 	}
@@ -48,8 +50,8 @@ func TestAnalyzeStubWhenFFprobeAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cached.GetFound() {
-		t.Fatal("expected stub result cached")
+	if cached.GetFound() {
+		t.Fatal("stub results must not be cached")
 	}
 }
 
@@ -63,8 +65,6 @@ func TestStubDimsAndCodec(t *testing.T) {
 	}
 }
 
-// TestAnalyzeWithHostFFmpegFixture runs Analyze against a tiny ffmpeg-generated
-// clip when ffmpeg+ffprobe are on PATH (Docker image includes both). Skips offline.
 func TestAnalyzeWithHostFFmpegFixture(t *testing.T) {
 	if _, err := exec.LookPath("ffprobe"); err != nil {
 		t.Skip("ffprobe absent; stub path covered by TestAnalyzeStubWhenFFprobeAbsent")
@@ -74,6 +74,7 @@ func TestAnalyzeWithHostFFmpegFixture(t *testing.T) {
 		t.Skip("ffmpeg absent; cannot synthesize Analyze fixture")
 	}
 
+	m, root := newTestModule(t)
 	tmp := t.TempDir()
 	out := filepath.Join(tmp, "fixture-1080p.mkv")
 	cmd := exec.Command(ffmpeg, "-y", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=1",
@@ -83,8 +84,17 @@ func TestAnalyzeWithHostFFmpegFixture(t *testing.T) {
 		t.Skipf("ffmpeg fixture generate failed (ok offline): %v\n%s", err, outBytes)
 	}
 
-	m := newTestModule(t)
-	resp, err := m.Analyze(context.Background(), &ffprobev1.AnalyzeRequest{FilePath: out})
+	allowed := filepath.Join(root, "allowed.mkv")
+	if err := os.Link(out, allowed); err != nil {
+		if err2 := copyFile(out, allowed); err2 != nil {
+			allowed = out
+			m.cfgMu.Lock()
+			m.allowPaths = parseAllowPaths("", []string{tmp})
+			m.cfgMu.Unlock()
+		}
+	}
+
+	resp, err := m.Analyze(context.Background(), &ffprobev1.AnalyzeRequest{FilePath: allowed})
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -94,4 +104,12 @@ func TestAnalyzeWithHostFFmpegFixture(t *testing.T) {
 	if resp.GetQuality() == nil || resp.GetQuality().GetResolution() != "1080p" {
 		t.Fatalf("quality: %+v", resp.GetQuality())
 	}
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
 }

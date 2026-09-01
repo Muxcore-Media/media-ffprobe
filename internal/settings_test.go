@@ -8,7 +8,7 @@ import (
 func TestSettingsProbeTunables(t *testing.T) {
 	m := NewModule(Config{})
 	defs := m.Settings()
-	if len(defs) != 2 {
+	if len(defs) != 5 {
 		t.Fatalf("defs=%d", len(defs))
 	}
 	if err := m.UpdateSetting("ffprobe_bin", "/usr/bin/ffprobe"); err != nil {
@@ -22,6 +22,25 @@ func TestSettingsProbeTunables(t *testing.T) {
 	}
 	if got := m.getProbeTimeout(); got != 45*time.Second {
 		t.Fatalf("timeout=%v", got)
+	}
+	if err := m.UpdateSetting("ffmpeg_bin", "/usr/bin/ffmpeg"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.getFFmpegBin(); got != "/usr/bin/ffmpeg" {
+		t.Fatalf("ffmpeg=%q", got)
+	}
+	root := t.TempDir()
+	if err := m.UpdateSetting("allow_paths", root); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.getAllowPaths(); len(got) != 1 {
+		t.Fatalf("allow=%v", got)
+	}
+	if err := m.UpdateSetting("generate_chapters", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.getGenerateChapters() {
+		t.Fatal("expected generate chapters true")
 	}
 	if err := m.UpdateSetting("probe_timeout", "nope"); err == nil {
 		t.Fatal("expected error")
