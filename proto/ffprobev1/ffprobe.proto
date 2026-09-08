@@ -24,6 +24,14 @@ message AnalyzeResponse {
 
   MediaQuality quality = 9;
   string error = 10;
+  repeated Chapter chapters = 11;
+}
+
+message Chapter {
+  int32 index = 1;
+  string title = 2;
+  double start_seconds = 3;
+  double end_seconds = 4;
 }
 
 message VideoStream {

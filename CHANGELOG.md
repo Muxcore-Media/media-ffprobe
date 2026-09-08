@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.9] — 2026-09-08
+
+### Added
+- Probe container chapters via `ffprobe -show_chapters` and return them on `AnalyzeResponse.chapters`.
+
 ## [0.1.8] — 2026-08-10
 
 ### Added

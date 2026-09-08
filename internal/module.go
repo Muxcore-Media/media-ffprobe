@@ -91,12 +91,12 @@ func NewModule(cfg Config) *Module {
 
 func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
-		ID:             m.id,
-		Name:           "Media FFprobe",
-		Version:      "0.1.8",
-		Roles:          []string{"analyzer"},
-		Description:    "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
-		Author:         "MuxCore",
+		ID:          m.id,
+		Name:        "Media FFprobe",
+		Version:     "0.1.9",
+		Roles:       []string{"analyzer"},
+		Description: "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
+		Author:      "MuxCore",
 		// Do not advertise bare "metadata" — that collides with metadata-tmdb discovery.
 		Capabilities:   []string{"media.analyzer", "settings"},
 		MinCoreVersion: "0.4.0",
@@ -189,8 +189,16 @@ func (m *Module) Health(ctx context.Context) error {
 // ── ffprobe types ─────────────────────────────────────────────
 
 type ffprobeOutput struct {
-	Streams []ffprobeStream `json:"streams"`
-	Format  ffprobeFormat   `json:"format"`
+	Streams  []ffprobeStream  `json:"streams"`
+	Format   ffprobeFormat    `json:"format"`
+	Chapters []ffprobeChapter `json:"chapters"`
+}
+
+type ffprobeChapter struct {
+	ID        int               `json:"id"`
+	StartTime string            `json:"start_time"`
+	EndTime   string            `json:"end_time"`
+	Tags      map[string]string `json:"tags"`
 }
 
 type ffprobeFormat struct {
@@ -325,6 +333,7 @@ func (m *Module) runFFprobe(path string) (*ffprobev1.AnalyzeResponse, error) {
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
+		"-show_chapters",
 		path,
 	)
 
@@ -383,9 +392,38 @@ func (m *Module) parseOutput(path string, out *ffprobeOutput) *ffprobev1.Analyze
 	}
 	resp.Audio = audios
 	resp.Subtitles = subs
+	resp.Chapters = parseChapters(out.Chapters)
 
 	resp.Quality = classifyQuality(resp.Video)
 	return resp
+}
+
+func parseChapters(in []ffprobeChapter) []*ffprobev1.Chapter {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*ffprobev1.Chapter, 0, len(in))
+	for _, ch := range in {
+		start, startErr := strconv.ParseFloat(strings.TrimSpace(ch.StartTime), 64)
+		end, endErr := strconv.ParseFloat(strings.TrimSpace(ch.EndTime), 64)
+		if startErr != nil || endErr != nil || end <= start {
+			continue
+		}
+		title := ""
+		if ch.Tags != nil {
+			title = strings.TrimSpace(ch.Tags["title"])
+		}
+		out = append(out, &ffprobev1.Chapter{
+			Index:        int32(len(out)),
+			Title:        title,
+			StartSeconds: start,
+			EndSeconds:   end,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (m *Module) parseVideo(s ffprobeStream) *ffprobev1.VideoStream {

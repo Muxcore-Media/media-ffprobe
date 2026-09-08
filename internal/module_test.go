@@ -350,6 +350,11 @@ func TestParseOutputStreams(t *testing.T) {
 			},
 			{Index: 3, CodecType: "data", CodecName: "bin_data"},
 		},
+		Chapters: []ffprobeChapter{
+			{ID: 0, StartTime: "0.000000", EndTime: "90.000000", Tags: map[string]string{"title": "Opening"}},
+			{ID: 1, StartTime: "90.000000", EndTime: "3600.500000", Tags: map[string]string{"title": "Act I"}},
+			{ID: 2, StartTime: "3600.500000", EndTime: "3600.500000", Tags: map[string]string{"title": "empty"}},
+		},
 	}
 	resp := m.parseOutput("/media/movie.mkv", out)
 	if resp.FilePath != "/media/movie.mkv" {
@@ -375,6 +380,26 @@ func TestParseOutputStreams(t *testing.T) {
 	}
 	if resp.Quality == nil {
 		t.Fatal("expected quality classification")
+	}
+	if len(resp.Chapters) != 2 {
+		t.Fatalf("chapters=%+v", resp.Chapters)
+	}
+	if resp.Chapters[0].Title != "Opening" || resp.Chapters[0].StartSeconds != 0 || resp.Chapters[0].EndSeconds != 90 {
+		t.Fatalf("chapter0=%+v", resp.Chapters[0])
+	}
+	if resp.Chapters[1].Title != "Act I" || resp.Chapters[1].StartSeconds != 90 {
+		t.Fatalf("chapter1=%+v", resp.Chapters[1])
+	}
+}
+
+func TestParseChaptersSkipsInvalid(t *testing.T) {
+	got := parseChapters([]ffprobeChapter{
+		{StartTime: "bad", EndTime: "10"},
+		{StartTime: "10", EndTime: "5"},
+		{StartTime: "12.5", EndTime: "20", Tags: map[string]string{"title": "  Mid  "}},
+	})
+	if len(got) != 1 || got[0].Title != "Mid" || got[0].StartSeconds != 12.5 || got[0].EndSeconds != 20 {
+		t.Fatalf("got=%+v", got)
 	}
 }
 
@@ -407,9 +432,9 @@ func TestStoreAndGetCachedHit(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := &ffprobev1.AnalyzeResponse{
-		FilePath: path,
+		FilePath:  path,
 		Container: "matroska",
-		Video: &ffprobev1.VideoStream{Codec: "h264", Width: 1920, Height: 1080},
+		Video:     &ffprobev1.VideoStream{Codec: "h264", Width: 1920, Height: 1080},
 	}
 	m.storeCache(path, result)
 
