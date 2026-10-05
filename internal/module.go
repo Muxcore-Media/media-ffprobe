@@ -318,8 +318,10 @@ func (m *Module) storeCache(path string, result *ffprobev1.AnalyzeResponse) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.db.Exec(`INSERT OR REPLACE INTO analysis_cache (file_path, file_size, file_modtime, result_json, created_at) VALUES (?, ?, ?, ?, ?)`,
-		path, info.Size(), info.ModTime().Unix(), string(jsonBytes), time.Now().UTC().Format(time.RFC3339))
+	if _, err := m.db.Exec(`INSERT OR REPLACE INTO analysis_cache (file_path, file_size, file_modtime, result_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+		path, info.Size(), info.ModTime().Unix(), string(jsonBytes), time.Now().UTC().Format(time.RFC3339)); err != nil {
+		slog.Warn("analysis cache write failed", "path", path, "error", err)
+	}
 }
 
 // ── ffprobe invocation ─────────────────────────────────────────

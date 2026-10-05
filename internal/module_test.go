@@ -20,7 +20,7 @@ func newTestModule(t *testing.T) *Module {
 	if err := m.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	t.Cleanup(func() { m.Stop(ctx) })
+	t.Cleanup(func() { _ = m.Stop(ctx) })
 	return m
 }
 
@@ -297,7 +297,9 @@ func TestCacheInvalidation(t *testing.T) {
 
 	tmp := t.TempDir()
 	filePath := filepath.Join(tmp, "test.mkv")
-	os.WriteFile(filePath, []byte("test data"), 0644)
+	if err := os.WriteFile(filePath, []byte("test data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Analyze a text file as "media" — ffprobe will fail, so this errors
 	// Instead, test that cache stores and retrieves properly by injecting
