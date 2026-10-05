@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Muxcore-Media/core/sdk/go/module/meshtls"
 	"google.golang.org/grpc"
 
 	ffprobev1 "github.com/Muxcore-Media/media-ffprobe/proto/ffprobev1"
@@ -150,7 +151,11 @@ func (m *Module) Init(ctx context.Context) error {
 }
 
 func (m *Module) Start(ctx context.Context) error {
-	m.grpcSrv = grpc.NewServer()
+	srv, err := meshtls.NewServer()
+	if err != nil {
+		return fmt.Errorf("mesh tls: %w", err)
+	}
+	m.grpcSrv = srv
 	ffprobev1.RegisterAnalysisServiceServer(m.grpcSrv, m)
 	modulesdk.RegisterSettings(m.grpcSrv, m.id, m)
 
