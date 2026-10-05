@@ -25,6 +25,7 @@ import (
 
 	"github.com/Muxcore-Media/core/pkg/contracts"
 	modulesdk "github.com/Muxcore-Media/core/sdk/go/module"
+	"github.com/Muxcore-Media/core/sdk/go/module/pathguard"
 	_ "modernc.org/sqlite"
 )
 
@@ -249,10 +250,50 @@ type ffprobeSideData struct {
 
 // ── gRPC API ───────────────────────────────────────────────────
 
-func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*ffprobev1.AnalyzeResponse, error) {
-	path := req.GetFilePath()
+func (m *Module) allowedRoots() []string {
+	raw := strings.TrimSpace(os.Getenv("FFPROBE_ALLOWED_ROOTS"))
+	if raw == "" {
+		return nil
+	}
+	var roots []string
+	for _, p := range filepath.SplitList(raw) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		roots = append(roots, abs)
+	}
+	return roots
+}
+
+func (m *Module) confineMediaPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
 	if path == "" {
-		return nil, fmt.Errorf("file_path is required")
+		return "", fmt.Errorf("file_path is required")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve file_path: %w", err)
+	}
+	roots := m.allowedRoots()
+	if len(roots) == 0 {
+		return "", fmt.Errorf("FFPROBE_ALLOWED_ROOTS is not configured")
+	}
+	resolved, err := pathguard.Confine(abs, roots)
+	if err != nil {
+		return "", fmt.Errorf("file_path outside allowed roots: %w", err)
+	}
+	return resolved, nil
+}
+
+func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*ffprobev1.AnalyzeResponse, error) {
+	path, err := m.confineMediaPath(req.GetFilePath())
+	if err != nil {
+		return nil, err
 	}
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -273,7 +314,11 @@ func (m *Module) Analyze(ctx context.Context, req *ffprobev1.AnalyzeRequest) (*f
 }
 
 func (m *Module) GetCached(ctx context.Context, req *ffprobev1.GetCachedRequest) (*ffprobev1.GetCachedResponse, error) {
-	if cached := m.checkCache(req.GetFilePath()); cached != nil {
+	path, err := m.confineMediaPath(req.GetFilePath())
+	if err != nil {
+		return &ffprobev1.GetCachedResponse{Found: false}, nil
+	}
+	if cached := m.checkCache(path); cached != nil {
 		return &ffprobev1.GetCachedResponse{Result: cached, Found: true}, nil
 	}
 	return &ffprobev1.GetCachedResponse{Found: false}, nil

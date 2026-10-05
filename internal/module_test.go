@@ -296,6 +296,7 @@ func TestCacheInvalidation(t *testing.T) {
 	m := newTestModule(t)
 
 	tmp := t.TempDir()
+	t.Setenv("FFPROBE_ALLOWED_ROOTS", tmp)
 	filePath := filepath.Join(tmp, "test.mkv")
 	if err := os.WriteFile(filePath, []byte("test data"), 0o644); err != nil {
 		t.Fatal(err)
@@ -429,10 +430,16 @@ func TestParseSubtitleDisposition(t *testing.T) {
 func TestStoreAndGetCachedHit(t *testing.T) {
 	m := newTestModule(t)
 	tmp := t.TempDir()
+	t.Setenv("FFPROBE_ALLOWED_ROOTS", tmp)
 	path := filepath.Join(tmp, "clip.mkv")
 	if err := os.WriteFile(path, []byte("fake"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path = real
 	result := &ffprobev1.AnalyzeResponse{
 		FilePath:  path,
 		Container: "matroska",
@@ -455,6 +462,39 @@ func TestStoreAndGetCachedHit(t *testing.T) {
 	}
 	if got.Video.Codec != "h264" {
 		t.Fatalf("analyze cache hit codec=%q", got.Video.Codec)
+	}
+}
+
+func TestAnalyzeRejectsPathOutsideRoots(t *testing.T) {
+	m := newTestModule(t)
+	root := t.TempDir()
+	t.Setenv("FFPROBE_ALLOWED_ROOTS", root)
+	outside := filepath.Join(t.TempDir(), "clip.mkv")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Analyze(context.Background(), &ffprobev1.AnalyzeRequest{FilePath: outside})
+	if err == nil {
+		t.Fatal("expected path outside FFPROBE_ALLOWED_ROOTS to be refused")
+	}
+}
+
+func TestAnalyzeRejectsSymlinkEscape(t *testing.T) {
+	m := newTestModule(t)
+	root := t.TempDir()
+	t.Setenv("FFPROBE_ALLOWED_ROOTS", root)
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.mkv")
+	if err := os.WriteFile(secret, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "escape.mkv")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Analyze(context.Background(), &ffprobev1.AnalyzeRequest{FilePath: link})
+	if err == nil {
+		t.Fatal("expected symlink escape to be refused")
 	}
 }
 

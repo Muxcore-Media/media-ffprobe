@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- `Analyze` refuses `file_path` values that do not resolve inside `FFPROBE_ALLOWED_ROOTS` (empty allow-list fails closed, including symlink escapes). `GetCached` misses closed for those paths.
+
 ## [0.1.13] - 2026-10-05
 
 
