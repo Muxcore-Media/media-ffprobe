@@ -1,7 +1,7 @@
 {
   "name": "Media FFprobe",
-  "description": "Media file analysis via ffprobe \u2014 detects codec, resolution, HDR, bitrate, and classifies quality",
-  "version": "0.1.9",
+  "description": "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and classifies quality",
+  "version": "0.1.11",
   "author": "MuxCore",
   "roles": [
     "analyzer"
