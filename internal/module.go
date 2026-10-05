@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	manifest "github.com/Muxcore-Media/media-ffprobe"
 	"log/slog"
 	"math"
 	"net"
@@ -93,7 +94,7 @@ func (m *Module) Info() contracts.ModuleInfo {
 	return contracts.ModuleInfo{
 		ID:          m.id,
 		Name:        "Media FFprobe",
-		Version:     "0.1.9",
+		Version:     modulesdk.ManifestVersion(manifest.ManifestJSON),
 		Roles:       []string{"analyzer"},
 		Description: "Media file analysis via ffprobe — detects codec, resolution, HDR, bitrate, and quality",
 		Author:      "MuxCore",
